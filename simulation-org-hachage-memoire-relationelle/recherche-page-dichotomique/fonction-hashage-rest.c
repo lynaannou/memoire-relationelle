@@ -85,6 +85,8 @@ int extend_bloc(int bloc_index, int taille_actuelle) {
             memory[bloc_index].pages[taille_actuelle][k].name[0] = '\0';
             memory[bloc_index].pages[taille_actuelle][k].surname[0] = '\0';
         }
+        TRACE("[extend] bloc %d had no free slots across %d pages -> extended to %d pages and zero-initialized new page",
+              bloc_index, taille_actuelle, new_taille);
     }
     return new_taille;
 }
@@ -137,63 +139,93 @@ void decalage_page_pour_insertion(page pages[], int key, int page_index, int blo
         return;
     }
 
+    int before_pages = taille_bloc(bloc_index);
+    bool bloc_has_space = verify_if_bloc_sature(bloc_index, before_pages);
+    bool page_has_space = verify_page_sature(bloc_index, page_index);
+    TRACE("[plan] I am inserting matricule=%d into bloc=%d page=%d. Page has space? %s. Bloc has space somewhere? %s. Pages in bloc=%d",
+          key, bloc_index, page_index, page_has_space ? "YES" : "NO", bloc_has_space ? "YES" : "NO", before_pages);
+
     if (!verify_if_bloc_sature(bloc_index, taille_bloc(bloc_index))) {
         if (!verify_page_sature(bloc_index, page_index)) {
+            TRACE("[plan] Target page is full and bloc has no space elsewhere -> extend bloc before shifting");
             extend_bloc(bloc_index, taille_bloc(bloc_index));
         }
     }
 
     int new_taille_bloc = taille_bloc(bloc_index);
+
+    // ASCENDING ORDER scan: stop at first empty slot OR first element >= key
     int i = 0;
-    while (i < taille_page) {
-        int cur = pages[page_index][i].matricule;
-        TRACE("[scan] key(%d) vs pages[%d][%d].matricule=%d", key, page_index, i, cur);
-        if (key < cur) break;
+    while (i < taille_page
+        && pages[page_index][i].matricule != 0
+        && key > pages[page_index][i].matricule) {
+        TRACE("[scan] At bloc=%d page=%d index=%d: current=%d < key=%d -> keep scanning (ascending)",
+              bloc_index, page_index, i, pages[page_index][i].matricule, key);
         i++;
     }
-    TRACE("[scan] insertion index page=%d i=%d", page_index, i);
+    TRACE("[decision] ASCENDING: I will open slot at i=%d in bloc=%d page=%d (reason: first empty or first >= key)",
+          i, bloc_index, page_index);
 
-    for (int j = new_taille_bloc - 1; j > page_index; j--) {
-        TRACE("[tail-shift] shift page %d using source page %d", j, j-1);
-        for (int k = taille_page - 1; k >= 0; k--) {
-            if (k == 0) {
-                int src = pages[j - 1][taille_page - 1].matricule;
-                TRACE("  [move] pages[%d][%d] <- pages[%d][%d] (%d)", j, k, j-1, taille_page-1, src);
-                pages[j][k] = pages[j - 1][taille_page - 1];
-                continue;
-            } else {
-                int src = pages[j][k - 1].matricule;
-                TRACE("  [move] pages[%d][%d] <- pages[%d][%d] (%d)", j, k, j, k-1, src);
-                pages[j][k] = pages[j][k - 1];
+    // Only shift tail pages if target page is actually full
+    bool page_full = (pages[page_index][taille_page - 1].matricule != 0);
+    if (page_full) {
+        TRACE("[tail-shift] Target page is full, I must propagate to later pages");
+        for (int j = new_taille_bloc - 1; j > page_index; j--) {
+            TRACE("[tail-shift] shift page %d right (carry from page %d)", j, j-1);
+            for (int k = taille_page - 1; k >= 0; k--) {
+                if (k == 0) {
+                    int src = pages[j - 1][taille_page - 1].matricule;
+                    TRACE("  [move] pages[%d][%d] = pages[%d][%d] (src=%d)  // carry tail forward",
+                          j, k, j-1, taille_page-1, src);
+                    pages[j][k] = pages[j - 1][taille_page - 1];
+                } else {
+                    int src = pages[j][k - 1].matricule;
+                    TRACE("  [move] pages[%d][%d] = pages[%d][%d] (src=%d)  // shift inside page",
+                          j, k, j, k-1, src);
+                    pages[j][k] = pages[j][k - 1];
+                }
             }
         }
+    } else {
+        TRACE("[tail-shift] Skipped: target page has free space, no need to propagate to later pages");
     }
 
-    TRACE("[in-page-shift] page=%d to i=%d", page_index, i);
+    TRACE("[in-page-shift] Shift inside bloc=%d page=%d from right down to i=%d", bloc_index, page_index, i);
     for (int j = taille_page - 1; j > i; j--) {
         int src = pages[page_index][j - 1].matricule;
-        TRACE("  [move] pages[%d][%d] <- pages[%d][%d] (%d)", page_index, j, page_index, j-1, src);
+        TRACE("  [move] pages[%d][%d] = pages[%d][%d] (src=%d)  // free index %d",
+              page_index, j, page_index, j-1, src, i);
         pages[page_index][j] = pages[page_index][j - 1];
     }
-    TRACE("[insert] pages[%d][%d] = key(%d)", page_index, i, e.matricule);
+
+    TRACE("[insert] Put matricule=%d at bloc=%d page=%d index=%d (ascending order preserved)",
+          e.matricule, bloc_index, page_index, i);
     pages[page_index][i] = e;
-    TRACE("[dump] page %d:", page_index);
+
+    TRACE("[dump] State of bloc=%d page=%d after insertion:", bloc_index, page_index);
     for (int t = 0; t < taille_page; ++t) {
         TRACE("  pages[%d][%d].matricule=%d", page_index, t, pages[page_index][t].matricule);
     }
 }
 void insertion(etudiant e) {
     int bloc_index = hashCode(e.matricule);
+    TRACE("[route] Student matricule=%d hashes to bloc=%d. I will find a page with space or extend.", e.matricule, bloc_index);
 
     int nbp = taille_bloc(bloc_index);
     int page_index = -1;
     for (int p = 0; p < nbp; ++p) {
-        if (verify_page_sature(bloc_index, p)) { page_index = p; break; }
+        bool has_space = verify_page_sature(bloc_index, p);
+        TRACE("[probe] Check bloc=%d page=%d for free slot -> %s", bloc_index, p, has_space ? "HAS SPACE" : "FULL");
+        if (has_space) { page_index = p; break; }
     }
     if (page_index == -1) {
         int old = nbp;
+        TRACE("[route] No page had space in bloc=%d. I extend the bloc from %d to %d pages and will use the new page index %d",
+              bloc_index, old, old+1, old);
         extend_bloc(bloc_index, old); // adds one page
         page_index = old;             // use new page
+    } else {
+        TRACE("[route] I will insert into existing free page: bloc=%d page=%d", bloc_index, page_index);
     }
     decalage_page_pour_insertion(memory[bloc_index].pages, e.matricule, page_index, bloc_index, e);
 }
@@ -318,12 +350,11 @@ int main(void) {
 
     // 5) Try some searches
     printf("\nSearch tests:\n");
-    // For a consistent test, compute expected bloc (requires hashCode == mod 5)
     int b0 = hashCode(5);
-    try_search(hashCode(5), 5);    // should find Alice
-    try_search(b0, 25);   // should find Frank
-    try_search(hashCode(7), 7); // Gina in her bloc
-    try_search(hashCode(999), 999);  // not present
+    try_search(hashCode(5), 5);
+    try_search(b0, 25);
+    try_search(hashCode(7), 7);
+    try_search(hashCode(999), 999);
 
     // 6) Optional: test verify_page_sature & extend_bloc explicitly on bloc 0
     printf("\nManual saturation test on bloc 0:\n");
